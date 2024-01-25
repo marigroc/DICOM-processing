@@ -1,4 +1,4 @@
-# USToolboxgit pull
+# USToolbox
 USToolbox is a Python application for [describe what your application does].
 
 ## Table of Contents
