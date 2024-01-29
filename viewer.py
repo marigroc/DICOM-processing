@@ -1,8 +1,8 @@
 # viewer.py
 
-import math
+import cv2
 import os
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, Circle
 import pydicom
 import matplotlib.pyplot as plt
 import numpy as np
@@ -48,7 +48,8 @@ class DCMViewer():
         self.signal_std_dev = 0
         self.snr = 0
         self.filtered_signal_std_dev, self.filtered_noise_std_dev = 0, 0
-        self.circle_radius = 0
+
+
         
     def load_images_progressively(self):
         for file_path in self.dicom_files:
@@ -85,27 +86,65 @@ class DCMViewer():
             self.image = image
             if self.ax is not None:
                 self.ax.imshow(self.image, cmap='gray')
-            plt.pause(0.1)
+                self.ax.set_title('DICOM Image {}'.format(self.current_index + 1))
+                self.fig.canvas.draw()
+                plt.pause(0.1)
             
     def _create_plot(self):
         self.fig, self.ax = plt.subplots()
-        im = self.ax.imshow(self.image, cmap='gray')
+        self.ax.imshow(self.image, cmap='gray')
+        self.ax.axis('off')
+        self.ax.set_title('DICOM Viewer')
+        plt.style.use('dark_background')
 
     def _configure_plot(self):
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.rect_selector = RectangleSelector(self.ax, self.on_select, useblit=True, interactive=True)
         self.rect_selector.rectprops = dict(facecolor='none', edgecolor='pink', linewidth=0.5)
-        plt.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key_press_event)
         self.ax.spines['bottom'].set_color('black')
         self.ax.spines['top'].set_color('black')
         self.ax.spines['left'].set_color('black')
         self.ax.spines['right'].set_color('black')
         self.ax.axis('off')
         self.ax.set_title('DICOM Viewer')
+        plt.subplots_adjust(left=0, right=1, bottom=0, top=1)
         plt.style.use('dark_background')
-        plt.show()
+        
+    def fit_circle(self, roi):
+        # roi is the rectangular region of interest (x1, y1, x2, y2)
 
+        # Crop the image to the specified ROI
+        cropped_image = self.image[int(roi[1]):int(roi[3]), int(roi[0]):int(roi[2])]
+
+        # Convert the cropped image to grayscale
+        gray_image = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2GRAY)
+
+        # Apply GaussianBlur to reduce noise and improve circle detection
+        blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
+
+        # Apply Hough Circle Transform
+        circles = cv2.HoughCircles(
+            blurred_image, 
+            cv2.HOUGH_GRADIENT, dp=1, minDist=50, param1=50, param2=30, minRadius=10, maxRadius=50
+        )
+
+        if circles is not None:
+            # Draw the circle on the original image
+            for circle in circles[0, :]:
+                center = (int(circle[0]), int(circle[1]))
+                radius = int(circle[2])
+                cv2.circle(cropped_image, center, radius, (0, 255, 0), 2)
+
+            # Display the image with the fitted circle
+            plt.imshow(cropped_image, cmap='gray')
+            plt.title('Fitted Circle in ROI')
+            plt.show()
+        else:
+            print("No circle detected in the specified ROI.")
+
+    
     def dcm_view(self):
         plt.style.use('dark_background')
         while True:
@@ -123,55 +162,18 @@ class DCMViewer():
                     continue
 
                 self.dicom_files = dicom_files
-                self._load_and_display_images()
                 self.current_index = 0
+                self.image = self.load_images_progressively().__next__()  # Load the first image
                 self._create_plot()
                 self._configure_plot()
+                plt.show()
                 break
 
             except TclError:
                 break
             except Exception as e:
                 messagebox.showinfo("Error", f"An error occurred: {str(e)}")
-    
-    current_selector = "rectangle"  # Default to rectangle selector
-    circle_selector = None  # Variable to hold the circle selector
-    
-    def switch_selector(self):
-        global current_selector, circle_selector
-        rect_selector = RectangleSelector(ax, viewer.on_select, useblit=False, interactive=True)
-        rect_selector.rectprops = dict(facecolor='none', edgecolor='pink', linewidth=0.5)
-        rect_selector.set_active(True)
-        if self.current_selector == "rectangle":
-            current_selector = "circle"
-            rect_selector.set_active(False)
-            rect_selector.set_visible(False)
 
-            # Create a new circle selector
-            circle_selector = plt.Circle((0, 0), 0, edgecolor='green', facecolor='none', linewidth=2)
-            self.ax.add_patch(circle_selector)
-
-        else:
-            current_selector = "rectangle"
-            if self.circle_selector:
-                self.circle_selector.remove()  # Remove the existing circle selector
-                self.circle_selector = None
-
-            rect_selector.set_active(True)
-            rect_selector.set_visible(True)
-
-
-    
-    def on_circle_select(self, event):
-        if event.key == 'c':
-            # Set the circle radius based on user mouse click
-            self.circle_radius = max(abs(self.x2 - self.x1), abs(self.y2 - self.y1)) / 2
-            # Draw the circle with the updated radius
-            self.circle_selector.set_radius(self.circle_radius)
-            self.circle_selector.center = ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-            self.ax.add_patch(self.circle_selector)
-            plt.draw()
-            
     def on_key_press(self, event):
         if event.key == 'left':
             self.current_index = max(0, self.current_index - 1)
@@ -192,6 +194,8 @@ class DCMViewer():
         
         self.x1, self.y1 = eclick.xdata, eclick.ydata
         self.x2, self.y2 = erelease.xdata, erelease.ydata
+        self.ax.add_patch(Rectangle((self.x1, self.y1), self.x2 - self.x1, self.y2 - self.y1,
+                                        edgecolor='none', facecolor='none', fill="false", linewidth=0))
         ds = pydicom.dcmread(self.dicom_files[self.current_index])
         # Extract y_min and y_max from DICOM metadata of the current image
         us_regions_seq = ds[0x0018, 0x6011]
@@ -207,9 +211,6 @@ class DCMViewer():
             self.top_left = (self.x1, y1)
             self.bottom_right = (self.x2, y2)
 
-        # Draw the rectangle on the plot
-        self.ax.add_patch(Rectangle((self.x1, self.y1), self.x2 - self.x1, self.y2 - self.y1, 
-                                    edgecolor='none', facecolor='none', fill="false", linewidth=0))
         # Redraw the image and rectangle
         self.fig.canvas.draw()
 
@@ -389,48 +390,38 @@ class DCMViewer():
         lcp_depth_mm = round(lcp_depth * mm_per_pix, 1) if lcp_depth is not None else None
         return lcp_depth_mm
 
-    # LCS part of the code
-class LowContrastSensitivity:
-    def __init__(self, image, contrast_regions, radius_ratio_1=0.7, radius_ratio_2=1.35, significance_threshold=3.3):
-        self.image = image
-        self.contrast_regions = contrast_regions
-        self.radius_ratio_1 = radius_ratio_1
-        self.radius_ratio_2 = radius_ratio_2
-        self.significance_threshold = significance_threshold
-        self.contrast_indices = []
-
-    def calculate_contrast_indices(self):
-        for region in self.contrast_regions:
-            contrast_index = self._calculate_contrast_index(region)
-            self.contrast_indices.append(contrast_index)
-        return self.contrast_indices
-
-    def _calculate_contrast_index(self, region):
-        x1, y1, x2, y2 = region  # Coordinates of the circular region
-        radius_inner = (x2 - x1) * self.radius_ratio_1
-        radius_outer = (x2 - x1) * self.radius_ratio_2
+    def calculate_single_lcs(self, image, circle):
+        x, y, radius = circle[0]
+        
+        # Coordinates of the circular region
+        x1, y1, x2, y2 = int(x - radius), int(y - radius), int(x + radius), int(y + radius)
 
         # Extract pixel values around two circles
-        pixels_inner = self._extract_pixels_in_circle(x1, y1, radius_inner)
-        pixels_outer = self._extract_pixels_in_circle(x1, y1, radius_outer)
+        pixels_inner = self._extract_pixels_in_circle(x, y, radius * 0.7, image)
+        pixels_outer = self._extract_pixels_in_circle(x, y, radius * 1.35, image)
 
         # Calculate mean and SD of pixel values
         mean_inner = np.mean(pixels_inner)
         mean_outer = np.mean(pixels_outer)
         sd_difference = np.std(np.concatenate([pixels_inner, pixels_outer]))
 
-        # Calculate contrast index using eqn (5)
-        contrast_index = mean_inner / mean_outer
+        # Calculate t-value and degrees of freedom
+        t_value = (mean_inner - mean_outer) / (sd_difference / np.sqrt(len(pixels_inner)))
+        degrees_of_freedom = len(pixels_inner) + len(pixels_outer) - 2
 
-        # Check for significance based on threshold
-        if sd_difference * self.significance_threshold < np.abs(mean_inner - mean_outer):
-            return contrast_index
+        # Calculate p-value
+        p_value = 2 * (1 - t.cdf(np.abs(t_value), degrees_of_freedom))
+
+        # Check for significance based on threshold (3.3 SE)
+        if p_value < 0.001:
+            # Calculate index of contrast using eqn (5)
+            index_of_contrast = mean_inner / mean_outer
+            return index_of_contrast
         else:
             return None
 
-    def _extract_pixels_in_circle(self, x_center, y_center, radius):
-        y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
-        distance = np.sqrt((x - x_center)**2 + (y - y_center)**2)
+    def _extract_pixels_in_circle(self, x_center, y_center, radius, image):
+        y, x = np.ogrid[:image.shape[0], :image.shape[1]]
+        distance = np.sqrt((x - x_center) ** 2 + (y - y_center) ** 2)
         mask = distance <= radius
-        return self.image[mask]
-
+        return image[mask]
