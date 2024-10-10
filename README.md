@@ -6,17 +6,45 @@ This comprehensive suite of programs is specifically designed to revolutionize a
 
 ## Features
 
+
+- **Automated Analysis:** The suite automates the analysis of captured US images.
+  
+- **Performance Parameters:** It estimates key performance parameters, including resolution, penetration depths, and sensitivity for both high and low contrast.
+
+- **Test Object:** Utilizes the ATS Laboratories Multipurpose Phantom Model 539 for standardized image acquisition.
+=======
+1. Clone the repository to your local machine:
+
+```bash
+git clone https://github.com/yourusername/USToolbox.git
+
+=======
 - **Automated Analysis:** The suite automates the analysis of captured US images.
   
 - **Performance Parameters:** It estimates key performance parameters, including resolution, penetration depths, and high and low contrast sensitivity.
 
 - **Test Object:** Utilizes the Multipurpose Phantom for standardized image acquisition.
 
+
 ## Usage
 
+
+1. **Image Acquisition:**
+   - Capture images of the test object on a PC with a video capture card.
+=======
+```bash
+cd USToolbox
+python -m venv venv
+source venv/bin/activate  # On Windows, use: .\venv\Scripts\activate
+pip install -r requirements.txt
+Usage
+To run the application, execute the gui.py script:
+
+=======
 1. **Image Acquisition:**
    - Capture images of the test object on an ultrasound scanner.
    - Transfer the DICOM study to the PC with the USToolbox software.
+
 
 2. **Automated Tests:**
    - Apply the suite for automated tests covering resolution, low- and high-contrast penetration, and low- and high-contrast sensitivity.
@@ -34,5 +62,17 @@ This comprehensive suite of programs is specifically designed to revolutionize a
 
 - **Increased Information:** Detailed information on the visibility of targets is provided, offering advantages over visual assessments.
 
+- **Multicentre Validation:** Ongoing validation efforts underscore the commitment to ensuring the reliability of the system.
+=======
+
+
+## Contact
+
+For inquiries and collaboration, please contact [ngibson@ncht.org.uk](mailto:ngibson@ncht.org.uk).
+
+---
+=======
 - **Multicentre Validation:** Ongoing validation efforts underscore the commitment to ensuring system reliability.
 
+
+*This README.md provides an overview of the Ultrasound Imaging Quality Control Suite. For detailed information and instructions, refer to the documentation provided.*

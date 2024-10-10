@@ -1,8 +1,8 @@
 # viewer.py
 
-import math
+import cv2
 import os
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Rectangle, Circle
 import pydicom
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,6 +40,10 @@ class DCMViewer():
         self.ax = None
         self.rect_selector = None
         self.x1, self.x2, self.y1, self.y2 = 0, 0, 0, 0
+        self.detected_circles = []  # List to store detected circles
+        self.selected_circle = None  # To store the selected circle for dragging
+        self.dragging = False  # Track if dragging is in progress
+        self.circle_artists = []  # List to store circle artists (graphical objects)
         self.txtfld2 = None
         self.top_left = None
         self.bottom_right = None
@@ -48,7 +52,8 @@ class DCMViewer():
         self.signal_std_dev = 0
         self.snr = 0
         self.filtered_signal_std_dev, self.filtered_noise_std_dev = 0, 0
-        self.circle_radius = 0
+
+
         
     def load_images_progressively(self):
         for file_path in self.dicom_files:
@@ -85,27 +90,209 @@ class DCMViewer():
             self.image = image
             if self.ax is not None:
                 self.ax.imshow(self.image, cmap='gray')
-            plt.pause(0.1)
+                self.ax.set_title('DICOM Image {}'.format(self.current_index + 1))
+                self.fig.canvas.draw()
+                plt.pause(0.1)
             
     def _create_plot(self):
         self.fig, self.ax = plt.subplots()
-        im = self.ax.imshow(self.image, cmap='gray')
+        self.ax.imshow(self.image, cmap='gray')
+        self.ax.axis('off')
+        self.ax.set_title('DICOM Viewer')
+        plt.style.use('dark_background')
 
     def _configure_plot(self):
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.rect_selector = RectangleSelector(self.ax, self.on_select, useblit=True, interactive=True)
         self.rect_selector.rectprops = dict(facecolor='none', edgecolor='pink', linewidth=0.5)
-        plt.subplots_adjust(left=0, right=1, bottom=0, top=1)
         self.ax.spines['bottom'].set_color('black')
         self.ax.spines['top'].set_color('black')
         self.ax.spines['left'].set_color('black')
         self.ax.spines['right'].set_color('black')
         self.ax.axis('off')
         self.ax.set_title('DICOM Viewer')
+        plt.subplots_adjust(left=0, right=1, bottom=0, top=1)
         plt.style.use('dark_background')
-        plt.show()
+        
+    def show_image(self, title, img):
+        """
+        Displays an image in a new figure with a title.
+        """
+        plt.figure()  # Create a new figure for each image
+        plt.imshow(img, cmap='gray')
+        plt.title(title)
+        plt.axis('off')  # Turn off the axis for better visualization
+        plt.show()  # Display the image
+        
+    def enable_circle_dragging(self):
+        # Connect mouse events to the canvas
+        self.fig.canvas.mpl_connect('button_press_event', self.on_click)
+        self.fig.canvas.mpl_connect('motion_notify_event', self.on_drag)
+        self.fig.canvas.mpl_connect('button_release_event', self.on_release)
+    
+    def on_click(self, event):
+        if event.inaxes != self.ax:
+            return
 
+        # Find the closest circle to the click point
+        for i, (x, y, r) in enumerate(self.detected_circles):
+            # Check if the click is inside the circle's area
+            if (x - event.xdata) ** 2 + (y - event.ydata) ** 2 <= r ** 2:
+                self.selected_circle = self.circle_artists[i]
+                self.dragging = True
+                print(f"Circle selected at ({x}, {y}) with radius {r}")
+                break
+
+    def on_drag(self, event):
+        if not self.dragging or self.selected_circle is None:
+            return
+
+        # Update the circle's position while dragging
+        if event.inaxes != self.ax:
+            return
+
+        # Update the circle's center to the new mouse position
+        self.selected_circle.center = (event.xdata, event.ydata)
+        self.fig.canvas.draw()
+
+    def on_release(self, event):
+        self.dragging = False
+        self.selected_circle = None
+                
+    def unsharp_mask(self, image, sigma=1.0, strength=1.5):
+        """
+        Apply unsharp mask to sharpen the image.
+        
+        :param image: Input image
+        :param sigma: Standard deviation for Gaussian blur
+        :param strength: Strength of the sharpening
+        :return: Sharpened image
+        """
+        blurred = cv2.GaussianBlur(image, (0, 0), sigma)
+        sharpened = cv2.addWeighted(image, 1 + strength, blurred, -strength, 0)
+        return sharpened   
+    
+    def detect_circle_in_roi(self, image, x1, y1, x2, y2):
+        """
+        Detects circles in the selected ROI using Hough Circle Transform with the key preprocessing steps.
+        """
+        # Calculate mm_per_pix (assuming `calculate_mm_per_pix` exists in your superclass or current class)
+        mm_per_pix = self.calc_mm()
+
+        # If mm_per_pix is None, show an error
+        if mm_per_pix is None:
+            print("mm_per_pix could not be determined.")
+            return
+
+        # Convert the known 8mm radius to pixels
+        radius_in_pixels = 4 / mm_per_pix
+        min_radius = int(radius_in_pixels * 0.95)  # Allow some tolerance
+        max_radius = int(radius_in_pixels * 1.05)
+        
+        # Extract the ROI from the image
+        roi = image[int(min(y1, y2)):int(max(y1, y2)), int(min(x1, x2)):int(max(x1, x2))]
+
+        # Convert to grayscale if not already
+        if len(roi.shape) == 3:
+            gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_roi = roi
+            
+        # Apply unsharp mask to sharpen the image
+        sharpened_roi = self.unsharp_mask(gray_roi)
+        # self.show_image("Sharpened ROI (Unsharp Mask)", sharpened_roi)
+        
+        # Apply median filtering to reduce speckle noise
+        denoised_roi = cv2.medianBlur(sharpened_roi, 9)
+        self.show_image("Denoised ROI (Median Blur)", denoised_roi)
+        
+        # Apply unsharp mask to sharpen the image
+        sharpeneded_roi = self.unsharp_mask(denoised_roi)
+        # self.show_image("Sharpened ROI (Unsharp Mask)", sharpeneded_roi)
+
+        # Apply CLAHE to enhance local contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced_roi = clahe.apply(sharpeneded_roi)
+        # self.show_image("Enhanced ROI (CLAHE)", enhanced_roi)
+
+        # Apply unsharp mask to sharpen the image
+        sharpenededed_roi = self.unsharp_mask(enhanced_roi)
+        # self.show_image("Sharpened ROI (Unsharp Mask)", sharpenededed_roi)
+        
+        # Apply Gaussian blur to smooth out the image
+        blurred_roi = cv2.GaussianBlur(sharpenededed_roi, (9, 9), 0)
+        # self.show_image("Blurred ROI (Gaussian Blur)", blurred_roi)
+        
+        # Optionally, apply Canny edge detection
+        edges = cv2.Canny(blurred_roi, 50, 90, apertureSize=3, L2gradient=True)
+        # self.show_image("Edges (Canny)", edges)
+        
+        # Convert 12mm of the distance between the centres into pixels
+        min_center_dist_in_pixels = 12 / mm_per_pix
+
+        # Now use Hough Circle Transform directly on the blurred image
+        circles = cv2.HoughCircles(edges, cv2.HOUGH_GRADIENT,
+                                dp=1.5,
+                                minDist=min_center_dist_in_pixels,
+                                param1=250,
+                                param2=6,
+                                minRadius=min_radius,
+                                maxRadius=max_radius)
+
+        detected_circles = []
+
+        if circles is not None:
+            circles = np.round(circles[0, :]).astype("int")
+            
+            for (x, y, r) in circles:
+                # Adjust coordinates to the original image
+                adjusted_x = x + int(min(x1, x2))
+                adjusted_y = y + int(min(y1, y2))
+
+                # Check if the circle is fully contained within the ROI
+                if (adjusted_x - r >= x1 and adjusted_y - r >= y1 and
+                    adjusted_x + r <= x2 and adjusted_y + r <= y2):
+                    
+                    # If the circle fits in the ROI, draw and store it
+                    circle_artist = Circle((adjusted_x, adjusted_y), r, edgecolor='yellow', fill=False, lw=2)
+                    self.ax.add_artist(circle_artist)
+                    self.circle_artists.append(circle_artist)
+                    self.detected_circles.append((adjusted_x, adjusted_y, r))
+                    
+                    # Store the detected circle's center and radius
+                    detected_circles.append((adjusted_x, adjusted_y, r))
+            # Now filter circles based on distance between centers
+            filtered_circles = []
+            for i, (cx1, cy1, r1) in enumerate(detected_circles):
+                is_valid = True
+                for j, (cx2, cy2, r2) in enumerate(detected_circles):
+                    if i != j:
+                        # Calculate Euclidean distance between two circle centers
+                        dist = np.sqrt((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2)
+                        # Convert 12mm distance to pixels
+                        expected_dist_in_pixels = 12 / mm_per_pix
+                        # Check if the distance is within a reasonable range (e.g., 10% tolerance)
+                        if not (0.9 * expected_dist_in_pixels <= dist <= 1.1 * expected_dist_in_pixels):
+                            is_valid = False
+                            break
+                if is_valid:
+                    filtered_circles.append((cx1, cy1, r1))
+                    
+                # Draw and store valid circles
+                for (x, y, r) in filtered_circles:
+                    circle_artist = Circle((x, y), r, edgecolor='yellow', fill=False, lw=2)
+                    self.ax.add_artist(circle_artist)
+                    self.circle_artists.append(circle_artist)
+                    self.detected_circles.append((x, y, r))
+                print(f"Detected circle at (x={x}, y={y}) with radius={r}")
+                
+            # Redraw the figure to show the circles
+            self.fig.canvas.draw()
+        else:
+            print("No circles detected in the ROI.")
+
+    
     def dcm_view(self):
         plt.style.use('dark_background')
         while True:
@@ -123,55 +310,18 @@ class DCMViewer():
                     continue
 
                 self.dicom_files = dicom_files
-                self._load_and_display_images()
                 self.current_index = 0
+                self.image = self.load_images_progressively().__next__()  # Load the first image
                 self._create_plot()
                 self._configure_plot()
+                plt.show()
                 break
 
             except TclError:
                 break
             except Exception as e:
                 messagebox.showinfo("Error", f"An error occurred: {str(e)}")
-    
-    current_selector = "rectangle"  # Default to rectangle selector
-    circle_selector = None  # Variable to hold the circle selector
-    
-    def switch_selector(self):
-        global current_selector, circle_selector
-        rect_selector = RectangleSelector(ax, viewer.on_select, useblit=False, interactive=True)
-        rect_selector.rectprops = dict(facecolor='none', edgecolor='pink', linewidth=0.5)
-        rect_selector.set_active(True)
-        if self.current_selector == "rectangle":
-            current_selector = "circle"
-            rect_selector.set_active(False)
-            rect_selector.set_visible(False)
 
-            # Create a new circle selector
-            circle_selector = plt.Circle((0, 0), 0, edgecolor='green', facecolor='none', linewidth=2)
-            self.ax.add_patch(circle_selector)
-
-        else:
-            current_selector = "rectangle"
-            if self.circle_selector:
-                self.circle_selector.remove()  # Remove the existing circle selector
-                self.circle_selector = None
-
-            rect_selector.set_active(True)
-            rect_selector.set_visible(True)
-
-
-    
-    def on_circle_select(self, event):
-        if event.key == 'c':
-            # Set the circle radius based on user mouse click
-            self.circle_radius = max(abs(self.x2 - self.x1), abs(self.y2 - self.y1)) / 2
-            # Draw the circle with the updated radius
-            self.circle_selector.set_radius(self.circle_radius)
-            self.circle_selector.center = ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-            self.ax.add_patch(self.circle_selector)
-            plt.draw()
-            
     def on_key_press(self, event):
         if event.key == 'left':
             self.current_index = max(0, self.current_index - 1)
@@ -189,27 +339,18 @@ class DCMViewer():
         Callback function to draw a rectangle and update the coordinates
         eclick and erelease are the press and release events
         """
-        
         self.x1, self.y1 = eclick.xdata, eclick.ydata
         self.x2, self.y2 = erelease.xdata, erelease.ydata
-        ds = pydicom.dcmread(self.dicom_files[self.current_index])
-        # Extract y_min and y_max from DICOM metadata of the current image
-        us_regions_seq = ds[0x0018, 0x6011]
-        if us_regions_seq:
-            y1 = us_regions_seq[0][0x0018, 0x601a].value
-            # print(y1)
-            y2 = us_regions_seq[0][0x0018, 0x601e].value
-            # print(y2)
-            self.x1 = min(eclick.xdata, erelease.xdata)
-            # print(self.x1)
-            self.x2 = max(eclick.xdata, erelease.xdata)
-            # print(self.x2)
-            self.top_left = (self.x1, y1)
-            self.bottom_right = (self.x2, y2)
+        self.ax.add_patch(Rectangle((self.x1, self.y1), self.x2 - self.x1, self.y2 - self.y1,
+                                    edgecolor='none', facecolor='none', fill=False, linewidth=0))
 
-        # Draw the rectangle on the plot
-        self.ax.add_patch(Rectangle((self.x1, self.y1), self.x2 - self.x1, self.y2 - self.y1, 
-                                    edgecolor='none', facecolor='none', fill="false", linewidth=0))
+        # Read the DICOM image
+        ds = pydicom.dcmread(self.dicom_files[self.current_index])
+        self.image = ds.pixel_array
+
+        # Call the circle detection function
+        self.detect_circle_in_roi(self.image, self.x1, self.y1, self.x2, self.y2)
+
         # Redraw the image and rectangle
         self.fig.canvas.draw()
 
@@ -389,48 +530,38 @@ class DCMViewer():
         lcp_depth_mm = round(lcp_depth * mm_per_pix, 1) if lcp_depth is not None else None
         return lcp_depth_mm
 
-    # LCS part of the code
-class LowContrastSensitivity:
-    def __init__(self, image, contrast_regions, radius_ratio_1=0.7, radius_ratio_2=1.35, significance_threshold=3.3):
-        self.image = image
-        self.contrast_regions = contrast_regions
-        self.radius_ratio_1 = radius_ratio_1
-        self.radius_ratio_2 = radius_ratio_2
-        self.significance_threshold = significance_threshold
-        self.contrast_indices = []
-
-    def calculate_contrast_indices(self):
-        for region in self.contrast_regions:
-            contrast_index = self._calculate_contrast_index(region)
-            self.contrast_indices.append(contrast_index)
-        return self.contrast_indices
-
-    def _calculate_contrast_index(self, region):
-        x1, y1, x2, y2 = region  # Coordinates of the circular region
-        radius_inner = (x2 - x1) * self.radius_ratio_1
-        radius_outer = (x2 - x1) * self.radius_ratio_2
+    def calculate_single_lcs(self, image, circle):
+        x, y, radius = circle[0]
+        
+        # Coordinates of the circular region
+        x1, y1, x2, y2 = int(x - radius), int(y - radius), int(x + radius), int(y + radius)
 
         # Extract pixel values around two circles
-        pixels_inner = self._extract_pixels_in_circle(x1, y1, radius_inner)
-        pixels_outer = self._extract_pixels_in_circle(x1, y1, radius_outer)
+        pixels_inner = self._extract_pixels_in_circle(x, y, radius * 0.7, image)
+        pixels_outer = self._extract_pixels_in_circle(x, y, radius * 1.35, image)
 
         # Calculate mean and SD of pixel values
         mean_inner = np.mean(pixels_inner)
         mean_outer = np.mean(pixels_outer)
         sd_difference = np.std(np.concatenate([pixels_inner, pixels_outer]))
 
-        # Calculate contrast index using eqn (5)
-        contrast_index = mean_inner / mean_outer
+        # Calculate t-value and degrees of freedom
+        t_value = (mean_inner - mean_outer) / (sd_difference / np.sqrt(len(pixels_inner)))
+        degrees_of_freedom = len(pixels_inner) + len(pixels_outer) - 2
 
-        # Check for significance based on threshold
-        if sd_difference * self.significance_threshold < np.abs(mean_inner - mean_outer):
-            return contrast_index
+        # Calculate p-value
+        p_value = 2 * (1 - t.cdf(np.abs(t_value), degrees_of_freedom))
+
+        # Check for significance based on threshold (3.3 SE)
+        if p_value < 0.001:
+            # Calculate index of contrast using eqn (5)
+            index_of_contrast = mean_inner / mean_outer
+            return index_of_contrast
         else:
             return None
 
-    def _extract_pixels_in_circle(self, x_center, y_center, radius):
-        y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
-        distance = np.sqrt((x - x_center)**2 + (y - y_center)**2)
+    def _extract_pixels_in_circle(self, x_center, y_center, radius, image):
+        y, x = np.ogrid[:image.shape[0], :image.shape[1]]
+        distance = np.sqrt((x - x_center) ** 2 + (y - y_center) ** 2)
         mask = distance <= radius
-        return self.image[mask]
-
+        return image[mask]

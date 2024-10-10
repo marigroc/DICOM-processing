@@ -25,11 +25,7 @@ if __name__ == '__main__':
     viewer = DCMViewer()
     window = Tk()
     window.protocol("WM_DELETE_WINDOW", on_close)  # Assign the handler function for the window close event.
-
-    # Button to switch between rectangle and circular selectors
-    btn_switch_selector = Button(window, text="Rect / Circle", fg='black', width=20, command=viewer.switch_selector)
-    btn_switch_selector.place(x=240, y=270)
-    
+   
     # Declaring buttons for all widgets
     btn = Button(window, text="Open new", fg="black", width=20)
     btn.place(x=80, y=90)
