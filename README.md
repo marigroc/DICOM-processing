@@ -41,7 +41,7 @@ For inquiries and collaboration, please contact [ngibson@ncht.org.uk](mailto:ngi
 
 ---
 =======
-- **Multicentre Validation:** Ongoing validation efforts underscore the commitment to ensuring system reliability.
 
+- **Multicentre Validation:** Ongoing validation efforts underscore the commitment to ensuring system reliability.
 
 *This README.md provides an overview of the Ultrasound Imaging Quality Control Suite. For detailed information and instructions, refer to the documentation provided.*

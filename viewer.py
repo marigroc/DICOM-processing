@@ -7,6 +7,7 @@ import pydicom
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import medfilt
+from scipy.stats import t
 from scipy.ndimage import convolve
 from matplotlib.widgets import RectangleSelector
 from tkinter import Tk, filedialog, messagebox, TclError
@@ -31,6 +32,7 @@ class SuperClass:
 
 class DCMViewer():
     def __init__(self):
+        self.debug = False  # Debug flag to toggle visualization
         self.current_index = 0
         self.dicom_files = []
         self.image = None
@@ -191,17 +193,26 @@ class DCMViewer():
         max_radius = int(radius_in_pixels * 1.05)
         
         # Extract the ROI from the image
+        if None in (y1, y2, x1, x2):
+            print("Error: Coordinates for ROI are not properly initialized.")
+            return None
         roi = image[int(min(y1, y2)):int(max(y1, y2)), int(min(x1, x2)):int(max(x1, x2))]
 
         # Convert to grayscale if not already
+        if roi is None or roi.size == 0:
+            print("Error: ROI is invalid or empty.")
+            return None
+
         if len(roi.shape) == 3:
             gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         else:
+            # If already grayscale, no conversion needed
             gray_roi = roi
             
         # Apply unsharp mask to sharpen the image
         sharpened_roi = self.unsharp_mask(gray_roi)
-        # self.show_image("Sharpened ROI (Unsharp Mask)", sharpened_roi)
+        if self.debug:
+            self.show_image("Sharpened ROI (Unsharp Mask)", sharpened_roi)
         
         # Apply median filtering to reduce speckle noise
         denoised_roi = cv2.medianBlur(sharpened_roi, 9)
@@ -209,24 +220,29 @@ class DCMViewer():
         
         # Apply unsharp mask to sharpen the image
         sharpeneded_roi = self.unsharp_mask(denoised_roi)
-        # self.show_image("Sharpened ROI (Unsharp Mask)", sharpeneded_roi)
+        if self.debug:
+            self.show_image("Sharpened ROI (Unsharp Mask)", sharpeneded_roi)
 
         # Apply CLAHE to enhance local contrast
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced_roi = clahe.apply(sharpeneded_roi)
-        # self.show_image("Enhanced ROI (CLAHE)", enhanced_roi)
+        if self.debug:
+            self.show_image("Enhanced ROI (CLAHE)", enhanced_roi)
 
         # Apply unsharp mask to sharpen the image
         sharpenededed_roi = self.unsharp_mask(enhanced_roi)
-        # self.show_image("Sharpened ROI (Unsharp Mask)", sharpenededed_roi)
+        if self.debug:
+            self.show_image("Sharpened ROI (Unsharp Mask)", sharpenededed_roi)
         
         # Apply Gaussian blur to smooth out the image
         blurred_roi = cv2.GaussianBlur(sharpenededed_roi, (9, 9), 0)
-        # self.show_image("Blurred ROI (Gaussian Blur)", blurred_roi)
+        if self.debug:
+            self.show_image("Blurred ROI (Gaussian Blur)", blurred_roi)
         
         # Optionally, apply Canny edge detection
         edges = cv2.Canny(blurred_roi, 50, 90, apertureSize=3, L2gradient=True)
-        # self.show_image("Edges (Canny)", edges)
+        if self.debug:
+            self.show_image("Edges (Canny)", edges)
         
         # Convert 12mm of the distance between the centres into pixels
         min_center_dist_in_pixels = 12 / mm_per_pix
@@ -364,22 +380,86 @@ class DCMViewer():
 
     def calc_mm(self):
         ds = pydicom.dcmread(self.dicom_files[self.current_index])
-        if ds is not None:
-            pixel_spacing = ds.get("0028,0030")
-            if pixel_spacing is not None:
-                try:
-                    self.mm_per_pix = np.asarray(pixel_spacing) * 10
-                    # print(f'Pixel spacing from first image: {self.mm_per_pix}')
-                except ValueError:
-                    print(f'Error: Pixel spacing {pixel_spacing} cannot be converted to float.')
-            else:
-                us_regions_seq = ds.get((0x0018, 0x6011))
-                pixel_spacing = us_regions_seq[0].get((0x0018, 0x602E)).value
-                self.mm_per_pix = pixel_spacing * 10
-                # print(f'Pixel spacing from first image: {self.mm_per_pix}')
-            return self.mm_per_pix
-    """
+        # Do not reset self.mm_per_pix here; only set if not already set
+        if not hasattr(self, 'mm_per_pix') or self.mm_per_pix is None:
+            if ds is not None:
+                pixel_spacing = ds.get("0028,0030")
+                if pixel_spacing is not None:
+                    try:
+                        self.mm_per_pix = np.asarray(pixel_spacing) * 10
+                    except ValueError:
+                        print(f'Error: Pixel spacing {pixel_spacing} cannot be converted to float.')
+                else:
+                    us_regions_seq = ds.get((0x0018, 0x6011))
+                    if us_regions_seq is not None:
+                        pixel_spacing = us_regions_seq[0].get((0x0018, 0x602E)).value
+                        self.mm_per_pix = pixel_spacing * 10
+                    else:
+                        # Pixel spacing not found, ask user to draw a 10mm line
+                        messagebox.showinfo("Draw 10mm Line", "Pixel spacing not found. Please draw a 10mm line on the image to calibrate. Then draw ROI and press 'Run LCP' again.")
+                        self._enable_line_selector_for_mm()
+                        return None
+        return self.mm_per_pix
 
+    def _enable_line_selector_for_mm(self):
+        self.ax.set_title("Click two points to draw a 10mm line for calibration")
+        self.fig.canvas.draw()
+        # Use ginput to get two points from the user
+        points = plt.ginput(2, timeout=-1)
+        if len(points) == 2:
+            self._on_line_drawn_for_mm(points)
+        else:
+            messagebox.showinfo("Calibration Cancelled", "Line not drawn. Calibration cancelled.")
+        self.ax.set_title("DICOM Viewer")
+        self.fig.canvas.draw()
+
+    def _on_line_drawn_for_mm(self, line):
+        (x1, y1), (x2, y2) = line
+        pixel_length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        self.mm_per_pix = 10.0 / pixel_length  # 10mm divided by pixel length
+        messagebox.showinfo(
+            "Calibration Done",
+            f"Calibration complete. mm_per_pix set to {self.mm_per_pix:.4f}. Now draw ROI and press 'Run LCP' again."
+        )
+        self.ax.set_title("DICOM Viewer")
+        self.fig.canvas.draw()
+
+
+    # Modify calc_lcp to wipe calibration after displaying lcp_depth
+    def calc_lcp(self, x1, y1, x2, y2):
+        roi = (x1, y1, x2, y2)
+        mm_per_pix = self.calc_mm()
+        if mm_per_pix is None:
+            messagebox.showinfo("Calibration Needed", "Please calibrate pixel spacing by drawing a 10mm line, then draw ROI and press 'Run LCP' again.")
+            return
+        roi1 = self.crop_image1(self.img1, roi)
+        roi2 = self.crop_image2(self.img2, roi)
+        self.sum_img, self.diff_img = self.calculate_sum_diff_images(roi1, roi2)
+        self.signal_std_dev, self.noise_std_dev, self.snr, self.depth = self.calculate_std_dev(self.sum_img, self.diff_img)
+        lcp = self.determine_lcp_depths(self.snr, self.depth, mm_per_pix)
+        self.txtfld2.insert("end", f"LCP: {lcp}\n")
+
+        # Plot in a new, separate window
+        fig, ax1 = plt.subplots(num="LCP Depth Profile")
+        ax1.plot([d * mm_per_pix for d in self.depth], self.noise_std_dev, 'r', label='Noise Standard Deviation')
+        ax1.plot([d * mm_per_pix for d in self.depth], self.signal_std_dev, 'orange', label='Signal Standard Deviation')
+        ax1.set_xlabel('Depth (mm)')
+        ax1.set_ylabel('Standard Deviation')
+        ax1.legend(loc='upper right')
+
+        ax2 = ax1.twinx()
+        ax2.plot([d * mm_per_pix for d in self.depth], self.snr, 'b', label='SNR')
+        ax2.set_ylabel('SNR')
+        ax2.legend(loc='upper left')
+        plt.title('LCP Depth Profile')
+        plt.tight_layout()
+        plt.show(block=False)  # Show in a new window, non-blocking
+
+        # Reset mm_per_pix after calculation for single use
+        self.mm_per_pix = None
+
+        return self.sum_img, self.diff_img
+    """
         # Instantiate the LCP class
         lcp_instance = LCP()
         # Calculate mm_per_pix here
@@ -428,100 +508,82 @@ class DCMViewer():
     def calc_lcp(self, x1, y1, x2, y2):
         roi = (x1, y1, x2, y2)
         mm_per_pix = self.calc_mm()
-        # Crop the images
+        if mm_per_pix is None:
+            messagebox.showinfo("Calibration Needed", "Please calibrate pixel spacing by drawing a 10mm line, then draw ROI and press 'Run LCP' again.")
+            return
         roi1 = self.crop_image1(self.img1, roi)
-
         roi2 = self.crop_image2(self.img2, roi)
-
-        # Perform the LCP calculations
         self.sum_img, self.diff_img = self.calculate_sum_diff_images(roi1, roi2)
         self.signal_std_dev, self.noise_std_dev, self.snr, self.depth = self.calculate_std_dev(self.sum_img, self.diff_img)
-        
         lcp = self.determine_lcp_depths(self.snr, self.depth, mm_per_pix)
-        # print(f'LCP: {lcp}')
-        
-        # Print the LCP value in txtfld2
         self.txtfld2.insert("end", f"LCP: {lcp}\n")
-        
-        fig, ax1 = plt.subplots()
+
+        # Plot in a new, separate window
+        fig, ax1 = plt.subplots(num="LCP Depth Profile")
         ax1.plot([d * mm_per_pix for d in self.depth], self.noise_std_dev, 'r', label='Noise Standard Deviation')
         ax1.plot([d * mm_per_pix for d in self.depth], self.signal_std_dev, 'orange', label='Signal Standard Deviation')
         ax1.set_xlabel('Depth (mm)')
         ax1.set_ylabel('Standard Deviation')
         ax1.legend(loc='upper right')
-        
+
         ax2 = ax1.twinx()
         ax2.plot([d * mm_per_pix for d in self.depth], self.snr, 'b', label='SNR')
         ax2.set_ylabel('SNR')
         ax2.legend(loc='upper left')
         plt.title('LCP Depth Profile')
         plt.tight_layout()
-        plt.show()
+        plt.show(block=False)  # Show in a new window, non-blocking
         return self.sum_img, self.diff_img
-        
+
     def crop_image1(self, img1, roi):
         x1, y1, x2, y2 = roi
         array1 = img1.pixel_array.astype(np.uint8) / img1.pixel_array.max()
         cropped_img1 = array1[int(min(y1, y2)):int(max(y1, y2)), int(min(x1, x2)):int(max(x1, x2))]
         return cropped_img1
-    
+
     def crop_image2(self, img2, roi):
         x1, y1, x2, y2 = roi
         array2 = img2.pixel_array.astype(np.uint8) / img2.pixel_array.max()
         cropped_img2 = array2[int(min(y1, y2)):int(max(y1, y2)), int(min(x1, x2)):int(max(x1, x2))]
         return cropped_img2
-    
+
     def calculate_sum_diff_images(self, roi1, roi2):
         sum_img = np.zeros(roi1.shape, dtype=np.uint8)
         sum_img = np.add(roi1, roi2)
-        
         if np.array_equal(roi1, roi2):
             print('images are the same')
-            
         else:
             diff_img = np.zeros(roi1.shape, dtype=np.uint8)
             diff_img = np.subtract(roi1, roi2)
-            
-        return sum_img, diff_img 
-    
+        return sum_img, diff_img
+
     def calculate_std_dev(self, sum_img, diff_img):
         window_size = 3
-        number_of_steps = (sum_img.shape[0] - 10) // window_size + 1  # Assuming `sum_img` is a numpy array
-        
+        number_of_steps = (sum_img.shape[0] - 10) // window_size + 1
         self.noise_std_dev = []
         self.signal_std_dev = []
         self.snr = []
-        
         for i in range(number_of_steps):
             start_idx = i * window_size
             end_idx = (i + 1) * window_size
-
-            # Ensure the end index does not go beyond the image shape
             end_idx = min(end_idx, sum_img.shape[0])
-
-            # Get a slice of the sum and diff images
             sum_slice = sum_img[start_idx:end_idx, :]
             diff_slice = diff_img[start_idx:end_idx, :]
-
-            # Calculate the standard deviation for noise as 2^-0.5 * (standard deviation for diff)
             self.noise_std_dev.append(np.std(diff_slice) * 2 ** -0.5)
-
-            # Calculate the standard deviation for signal as 0.5 * ((standard deviation for sum)^2 - (standard deviation
-            # for sum)^2)^0.5
-            self.signal_std_dev.append(0.5 * ((np.std(sum_slice) ** 2 - np.std(diff_slice) ** 2) ** 0.5))
-
-            # Calculate the signal-to-noise ratio per slice as the signal standard deviation of the slice divided by the
-            # noise standard deviation of the slice
+            self.signal_std_dev.append(0.5 * ((np.std(sum_slice) ** 2 - np.std(diff_slice) ** 2) ** 0.5)
+                                    if np.std(sum_slice) ** 2 - np.std(diff_slice) ** 2 > 0 else 0)
             if self.noise_std_dev[-1] > 0:
                 self.snr.append(self.signal_std_dev[-1] / self.noise_std_dev[-1])
             else:
                 self.snr.append(0.0)
-
-        # Update the depth calculation
-        depth = list(range(10, 10 + number_of_steps * window_size, window_size))
+        depth = list(range(0, number_of_steps * window_size, window_size))
+        # Apply 7-point median filter
         self.noise_std_dev = medfilt(self.noise_std_dev, 7)
-        self.signal_std_dev = medfilt(self.signal_std_dev, 7)    
-
+        self.signal_std_dev = medfilt(self.signal_std_dev, 7)
+        # Apply 7-point moving average filter
+        kernel = np.ones(7) / 7
+        self.noise_std_dev = np.convolve(self.noise_std_dev, kernel, mode='same')
+        self.signal_std_dev = np.convolve(self.signal_std_dev, kernel, mode='same')
         return self.signal_std_dev, self.noise_std_dev, self.snr, depth
 
     def determine_lcp_depths(self, snr, depth, mm_per_pix):
@@ -537,6 +599,7 @@ class DCMViewer():
 
         lcp_depth_mm = round(lcp_depth * mm_per_pix, 1) if lcp_depth is not None else None
         return lcp_depth_mm
+
 
     def calculate_single_lcs(self, image, circle):
         x, y, radius = circle[0]
