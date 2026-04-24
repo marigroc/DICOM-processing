@@ -162,25 +162,124 @@ class Controller:
         self.view.insert_output("Uniformity measurements: not yet implemented.\n")
 
     def on_run_lcs(self):
-        if not self.detected_circles:
-            messagebox.showinfo("No Circles", "Please detect circles first (Run Circle Detection).")
+        # Check prerequisites
+        if self.roi_coords is None:
+            messagebox.showinfo("No ROI", "Please draw an ROI rectangle first.")
             return
-        img = self.cache.get_image(self.current_index)
-        results = []
-        for (x, y, r) in self.detected_circles:
-            data = LCS.calculate_contrast_index(img, x, y, r)
-            if data:
-                results.append({'circle': (x, y, r), 'data': data})
-                self.view.insert_output(
-                    f"Circle ({x}, {y}) radius={r}: Contrast Index = {data['contrast_index']:.4f}\n"
-                )
-        if not results:
-            self.view.insert_output("No valid LCS data for detected circles.\n")
-        else:
-            ci_vals = [d['data']['contrast_index'] for d in results]
-            self.view.insert_output(f"Mean Contrast Index: {np.mean(ci_vals):.4f}\n")
-            self.view.insert_output(f"Std Dev: {np.std(ci_vals):.4f}\n")
+        if self.mm_per_pix is None:
+            self.on_calibrate_mm()
+            if self.mm_per_pix is None:
+                return
 
+        # Get current image
+        img_float = self.cache.get_image(self.current_index)
+        img_uint8 = (img_float * 255).astype(np.uint8)
+
+        # Detect circles (draws them)
+        circles = self._detect_circles_in_roi(img_uint8, self.roi_coords)
+
+        self.view.insert_output(f"Circle detection: {len(circles)} circles\n")
+
+        if not circles:
+            self.view.insert_output("No circles detected – cannot compute LCS.\n")
+            return
+
+        # Compute LCS contrast index for each circle
+        for (x, y, r) in circles:
+            data = LCS.calculate_contrast_index(img_float, x, y, r)
+            if data:
+                self.view.insert_output(f"Contrast Index = {data['contrast_index']:.4f}\n")
+            else:
+                self.view.insert_output("Contrast Index = N/A\n")
+            
+    def _detect_circles_in_roi(self, image_uint8, roi_coords):
+        """
+        Detect circles in the given ROI using Hough transform.
+        Returns circles with radius set exactly to 4 mm (in pixels).
+        """
+        if self.mm_per_pix is None:
+            self.view.insert_output("Cannot detect circles: missing calibration.\n")
+            return []
+
+        # Expected exact radius in pixels for a 4 mm target
+        exact_radius_px = 4.0 / self.mm_per_pix
+
+        # Allow ±5% tolerance for detection
+        min_r = int(exact_radius_px * 0.95)
+        max_r = int(exact_radius_px * 1.05)
+        min_dist_px = 12.0 / self.mm_per_pix   # centre‑to‑centre distance (12 mm)
+
+        x1, y1, x2, y2 = roi_coords
+        xi1, xi2 = int(min(x1, x2)), int(max(x1, x2))
+        yi1, yi2 = int(min(y1, y2)), int(max(y1, y2))
+        roi = image_uint8[yi1:yi2, xi1:xi2]
+
+        if roi.size == 0:
+            self.view.insert_output("Invalid ROI.\n")
+            return []
+
+        import cv2
+        def unsharp_mask(image, sigma=1.0, strength=1.5):
+            blurred = cv2.GaussianBlur(image, (0, 0), sigma)
+            return cv2.addWeighted(image, 1+strength, blurred, -strength, 0)
+
+        # Preprocessing
+        sharp = unsharp_mask(roi)
+        denoised = cv2.medianBlur(sharp, 9)
+        sharp2 = unsharp_mask(denoised)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(sharp2)
+        sharp3 = unsharp_mask(enhanced)
+        blurred = cv2.GaussianBlur(sharp3, (9,9), 0)
+        edges = cv2.Canny(blurred, 50, 90, apertureSize=3, L2gradient=True)
+
+        # Use Hough parameters that detect all circles (param2 lower = more sensitive)
+        circles = cv2.HoughCircles(edges, cv2.HOUGH_GRADIENT,
+                                dp=1.5,
+                                minDist=min_dist_px,
+                                param1=250,
+                                param2=6,          # Kept at original working value
+                                minRadius=min_r,
+                                maxRadius=max_r)
+
+        # Clear previous circles
+        for artist in self.circle_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self.circle_artists.clear()
+        self.detected_circles.clear()
+
+        detected = []
+        if circles is not None:
+            # Round and convert to integer coordinates
+            circles = np.round(circles[0, :]).astype("int")
+
+            # For each detected circle, draw with the exact 4 mm radius
+            for (cx, cy, r_det) in circles:
+                x_full = cx + xi1
+                y_full = cy + yi1
+
+                # Check if the fixed‑radius circle fits entirely inside the ROI
+                if (x_full - exact_radius_px >= xi1 - 0.5 and
+                    y_full - exact_radius_px >= yi1 - 0.5 and
+                    x_full + exact_radius_px <= xi2 + 0.5 and
+                    y_full + exact_radius_px <= yi2 + 0.5):
+
+                    detected.append((x_full, y_full, exact_radius_px))
+                    circ = Circle((x_full, y_full), exact_radius_px,
+                                edgecolor='yellow', fill=False, lw=2)
+                    self.ax.add_artist(circ)
+                    self.circle_artists.append(circ)
+
+            self.view.insert_output(f"Detected {len(detected)} circles (radius fixed to 4.0 mm / {exact_radius_px:.1f} px).\n")
+            self.fig.canvas.draw()
+        else:
+            self.view.insert_output("No circles detected.\n")
+
+        return detected
+    
     def on_hcs_tool(self):
         self.view.insert_output("HCS Tool: not yet implemented.\n")
 
@@ -374,59 +473,7 @@ class Controller:
 
         img_float = self.cache.get_image(self.current_index)
         img_uint8 = (img_float * 255).astype(np.uint8)
-        x1, y1, x2, y2 = self.roi_coords
-        xi1, xi2 = int(min(x1, x2)), int(max(x1, x2))
-        yi1, yi2 = int(min(y1, y2)), int(max(y1, y2))
-        roi = img_uint8[yi1:yi2, xi1:xi2]
-        if roi.size == 0:
-            self.view.insert_output("Invalid ROI.\n")
-            return
-
-        import cv2
-        def unsharp_mask(image, sigma=1.0, strength=1.5):
-            blurred = cv2.GaussianBlur(image, (0, 0), sigma)
-            return cv2.addWeighted(image, 1+strength, blurred, -strength, 0)
-
-        sharp = unsharp_mask(roi)
-        denoised = cv2.medianBlur(sharp, 9)
-        sharp2 = unsharp_mask(denoised)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(sharp2)
-        sharp3 = unsharp_mask(enhanced)
-        blurred = cv2.GaussianBlur(sharp3, (9,9), 0)
-        edges = cv2.Canny(blurred, 50, 90, apertureSize=3, L2gradient=True)
-
-        radius_px = 4.0 / self.mm_per_pix
-        min_r = int(radius_px * 0.95)
-        max_r = int(radius_px * 1.05)
-        min_dist_px = 12.0 / self.mm_per_pix
-
-        circles = cv2.HoughCircles(edges, cv2.HOUGH_GRADIENT,
-                                   dp=1.5, minDist=min_dist_px,
-                                   param1=250, param2=6,
-                                   minRadius=min_r, maxRadius=max_r)
-
-        # Clear previous circles
-        for artist in self.circle_artists:
-            artist.remove()
-        self.circle_artists.clear()
-        self.detected_circles.clear()
-
-        if circles is not None:
-            circles = np.round(circles[0, :]).astype("int")
-            for (cx, cy, r) in circles:
-                x_full = cx + xi1
-                y_full = cy + yi1
-                if (x_full - r >= xi1 and y_full - r >= yi1 and
-                    x_full + r <= xi2 and y_full + r <= yi2):
-                    self.detected_circles.append((x_full, y_full, r))
-                    circ = Circle((x_full, y_full), r, edgecolor='yellow', fill=False, lw=2)
-                    self.ax.add_artist(circ)
-                    self.circle_artists.append(circ)
-            self.view.insert_output(f"Detected {len(self.detected_circles)} circles.\n")
-            self.fig.canvas.draw()
-        else:
-            self.view.insert_output("No circles detected.\n")
+        self._detect_circles_in_roi(img_uint8, self.roi_coords)     
     
     def on_slider_jump(self, new_index):
         if 0 <= new_index < self.cache.total_count():

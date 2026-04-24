@@ -166,8 +166,8 @@ class LCS:
         roi_width = x_max - x_min
         roi_height = y_max - y_min
         roi_bounds = (0, 0, roi_width, roi_height)
-        in_roi = LCS.expand_circle(roi_bounds, inr)
-        out_roi = LCS.expand_circle(roi_bounds, outr)
+        in_roi = LCS.expand_circle(roi_bounds, 0.7)
+        out_roi = LCS.expand_circle(roi_bounds, 1.35)
         in_pixels = LCS.get_pixels_on_circle(in_roi, 0.05, roi)
         out_pixels = LCS.get_pixels_on_circle(out_roi, 0.05, roi)
         if len(in_pixels) == 0 or len(out_pixels) == 0:

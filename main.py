@@ -57,7 +57,6 @@ def main():
         on_clear_overlay=controller.on_clear_overlay,
         on_fwhm=controller.on_fwhm,
         on_calibrate_mm=controller.on_calibrate_mm,
-        on_detect_circles=controller.on_detect_circles,
     )
 
     root.mainloop()

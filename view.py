@@ -18,7 +18,7 @@ class MainWindow:
     def __init__(self, root):
         self.root = root
         self.root.title("Ultrasound QC Toolbox - Control Panel")
-        self.root.geometry("610x700")
+        self.root.geometry("610x800")
 
         # Left frame for buttons – will resize to fit content
         left_frame = tk.Frame(self.root)
@@ -122,8 +122,6 @@ class MainWindow:
         self.btn_fwhm.pack(pady=2)
         self.btn_calibrate = tk.Button(parent, text="Calibrate (10mm)", width=25)
         self.btn_calibrate.pack(pady=2)
-        self.btn_detect_circles = tk.Button(parent, text="Detect Circles", width=25)
-        self.btn_detect_circles.pack(pady=2)
 
     def set_callbacks(self, **callbacks):
         self.callbacks = callbacks
@@ -150,7 +148,6 @@ class MainWindow:
             'on_clear_overlay': self.btn_clear_overlay,
             'on_fwhm': self.btn_fwhm,
             'on_calibrate_mm': self.btn_calibrate,
-            'on_detect_circles': self.btn_detect_circles,
         }
         for key, btn in mapping.items():
             if key in callbacks:
@@ -174,25 +171,22 @@ class MainWindow:
 
 
 class ImageViewerWindow:
-    """Separate window with image display and a navigation slider."""
+    """Separate window with image display – 1:1 pixel mapping."""
     def __init__(self, parent_root, total_images=0):
         self.window = tk.Toplevel(parent_root)
         self.window.title("DICOM Image Viewer")
-        self.window.geometry("800x700")
         self.window.lift()
         self.window.focus_force()
 
-        # Use grid layout: row0 = canvas (expands), row1 = slider (fixed height)
+        # Use grid layout
         self.window.grid_rowconfigure(0, weight=1)
         self.window.grid_rowconfigure(1, weight=0)
         self.window.grid_columnconfigure(0, weight=1)
 
-        # Matplotlib figure
-        self.fig = Figure(figsize=(7, 7), dpi=100, facecolor='black')
+        # Matplotlib figure – initial dummy size, will be resized per image
+        self.fig = Figure(figsize=(1, 1), dpi=100, facecolor='black')
         self.ax = self.fig.add_subplot(111)
         self.ax.axis('off')
-        self.ax.set_position([0, 0, 1, 1])
-        self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.window)
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
@@ -211,9 +205,11 @@ class ImageViewerWindow:
         self.index_label = tk.Label(slider_frame, text="0/0", width=10)
         self.index_label.pack(side=tk.LEFT, padx=5)
 
-        # Slider callback
         self.on_slider_changed = None
         self.slider.bind("<ButtonRelease-1>", self._slider_released)
+
+        # Store current image dimensions
+        self.current_image_shape = (0, 0)
 
     def _slider_released(self, event):
         if self.on_slider_changed:
@@ -238,12 +234,38 @@ class ImageViewerWindow:
         return self.ax
 
     def update_image(self, image_array):
+        """Display image at 1:1 native pixel resolution."""
         self.ax.clear()
-        self.ax.imshow(image_array, cmap='gray', aspect='auto')
+        self.ax.imshow(image_array, cmap='gray', aspect='equal')
         self.ax.axis('off')
-        self.ax.set_position([0, 0, 1, 1])
-        self.canvas.draw()
+        self.fig.canvas.draw()
+
+        # Get image dimensions (height, width)
+        height, width = image_array.shape[:2]
+
+        # If dimensions changed, resize the figure and the window
+        if (height, width) != self.current_image_shape:
+            self.current_image_shape = (height, width)
+
+            # Set figure size in inches: pixels / dpi (dpi=100)
+            dpi = self.fig.dpi
+            fig_width = width / dpi
+            fig_height = height / dpi
+            self.fig.set_size_inches(fig_width, fig_height)
+
+            # Remove all margins around the axes
+            self.ax.set_position([0, 0, 1, 1])
+            self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1, wspace=0, hspace=0)
+
+            # Resize the Tkinter window to fit the figure + slider
+            slider_height = 60   # approximate height of slider frame + padding
+            total_height = height + slider_height
+            total_width = width + 10   # small horizontal margin
+            self.window.geometry(f"{total_width}x{total_height}")
+
+            # Force canvas to update layout
+            self.canvas.get_tk_widget().update_idletasks()
 
     def set_title(self, title):
         self.ax.set_title(title, color='white', fontsize=10)
-        self.canvas.draw()
+        self.fig.canvas.draw()
